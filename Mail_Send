@@ -1,0 +1,175 @@
+//-------------------------Mail.cshtml----------------
+
+@page
+@model OMS.Pages.MailModel
+@{
+    <form method="post" enctype="multipart/form-data">
+        <table>
+            <tr>
+                <td style="width: 80px">To:</td>
+                <td><input type="text" asp-for="Input.To" /></td>
+            </tr>
+            
+            <tr><td>&nbsp;</td></tr>
+            <tr>
+                <td></td>
+                <td><input type="submit" value="Send" asp-page-handler="SendEmail" /></td>
+            </tr>
+        </table>
+    </form>
+    @if (ViewData["Message"] != null)
+    {
+        <script type="text/javascript">
+            window.onload = function () {
+                alert("@ViewData["Message"]");
+            };
+        </script>
+    }
+}
+
+//-------------------------Mail.cshtml.cs----------------
+
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.RazorPages;
+using Npgsql;
+using System.ComponentModel.DataAnnotations;
+using System.Net;
+using System.Net.Mail;
+namespace OMS.Pages
+{
+    public class MailModel : PageModel
+    {
+        public class EmailModel
+        {
+            [Required, EmailAddress]
+            public string To { get; set; }   // Primary recipient
+           
+        }
+        private readonly IConfiguration _config;
+
+        public MailModel(IConfiguration config)
+        {
+            _config = config;
+        }
+
+        [BindProperty]
+        public EmailModel Input { get; set; }  // Binds form data to this property
+
+        public void OnGet()
+        {
+        }
+        string filePath = "";
+
+        public async Task<string> GetFileAsBase64Async(int id)
+        {
+            string fileName = null;
+            byte[] fileBytes = null;
+
+            using (var con = new NpgsqlConnection(ConnectionString.CNamedash))
+            {
+                await con.OpenAsync();
+
+                using (var cmd = new NpgsqlCommand("SELECT sign_pi_req_file_name FROM tbl_name WHERE PI_ID = pi_id", con))
+                {
+                    cmd.Parameters.AddWithValue("pi_id", HttpContext.Session.GetString("pi_id"));
+
+                    using (var reader = await cmd.ExecuteReaderAsync())
+                    {
+                        if (await reader.ReadAsync())
+                        {
+                            fileName = reader["sign_pi_req_file_name"].ToString();
+                        }
+                    }
+                }
+            }
+
+            if (!string.IsNullOrEmpty(fileName))
+            {
+                 filePath = Path.Combine(Directory.GetCurrentDirectory(), "wwwroot", "uploads", fileName);
+
+                if (System.IO.File.Exists(filePath))
+                {
+                    fileBytes = await System.IO.File.ReadAllBytesAsync(filePath);
+                    return Convert.ToBase64String(fileBytes);
+                }
+            }
+            return null;
+        }
+
+        public async Task<IActionResult> OnPostSendEmail()
+        {
+            if (!ModelState.IsValid)
+            {
+                return Page();
+            }
+            try
+            {
+                string base64File = await GetFileAsBase64Async(1);
+                if (!string.IsNullOrEmpty(base64File))
+                {      
+                if (System.IO.File.Exists(filePath))
+                {
+                    byte[] fileBytes = await System.IO.File.ReadAllBytesAsync(filePath);
+                     System.IO.File.WriteAllBytes(filePath, Convert.FromBase64String(base64File));
+
+                    // Get SMTP settings from appsettings.json
+                    var smtpSection = _config.GetSection("Smtp");
+
+                    using (var mm = new MailMessage())
+                    {
+                        // From address = Gmail account
+                        mm.From = new MailAddress(smtpSection["User"]);
+
+                        // To address (required)
+                        mm.To.Add(Input.To);
+
+                        // If CC addresses are provided (comma separated)
+                        mm.CC.Add("priyankakhapra01@gmail.com");
+
+                        // Subject & Body
+                        mm.Subject = "razor page -test";
+                        mm.Body = "Hi! <br> Test th emial in razor page";
+                        mm.IsBodyHtml = true;
+
+                        // If attachment is uploaded
+                        if (System.IO.File.Exists(filePath))
+                        {
+                            var attachment = new Attachment(filePath);
+                            mm.Attachments.Add(attachment);
+                        }
+
+                        // SMTP client setup
+                        using (var smtp = new SmtpClient(smtpSection["Server"]))
+                        {
+                            smtp.Port = int.Parse(smtpSection["Port"]);
+                            smtp.EnableSsl = bool.Parse(smtpSection["EnableSsl"]);
+                            smtp.Credentials = new NetworkCredential(
+                                smtpSection["User"],
+                                smtpSection["Password"]
+                            );
+                            // Send mail
+                            smtp.Send(mm);
+                        }
+                    }
+                        ViewData["Message"] = "✅ Email sent successfully!";
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                ViewData["Message"] = "❌ Error sending email: " + ex.Message;
+            }
+            return Page();
+        }
+    }
+    }
+
+//-------------------------appsettings.json----------------
+
+  "Smtp": {
+    "Server": "smtp.gmail.com",
+    "Port": 587,
+    "EnableSsl": true,
+    "User": "mail@gmail.com",              // your mai id
+    "Password": "you app-password"        // not gmail password-- app pasword generte in gmail account in manage your account
+  }
