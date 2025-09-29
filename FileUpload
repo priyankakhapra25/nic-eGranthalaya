@@ -1,0 +1,95 @@
+//-------------------FILE UPLOAD--------------------
+
+ public async Task<IActionResult> OnPost(uploadPI uploadPI)
+ {
+     uploadpi = new uploadPI();
+     int actionResult = 0;
+     string resultMsg = "";
+
+     if ((uploadPI.pef_rc_nicsi != null && uploadPI.pef_rc_nicsi.Length > 0) &&
+         (uploadPI.pi_file_name != null && uploadPI.pi_file_name.Length > 0))
+     {
+         var uploadsFolder = Path.Combine(Directory.GetCurrentDirectory(), "wwwroot", "uploads");
+         Directory.CreateDirectory(uploadsFolder);
+
+         var pef_file_name = HttpContext.Session.GetString("pi_id") + "_" + Path.GetFileName(uploadPI.pef_rc_nicsi.FileName);
+         var pi_file_name = HttpContext.Session.GetString("pi_id") + "_" + Path.GetFileName(uploadPI.pi_file_name.FileName);
+
+         var filePath_pef = Path.Combine(uploadsFolder,  pef_file_name);
+         var filePath_pi = Path.Combine(uploadsFolder,  pi_file_name);
+
+         string connectionString = ConnectionString.CNamedash;
+
+         if (ModelState.IsValid)
+         {
+             try
+             {
+                 await using var con = new NpgsqlConnection(connectionString);
+                 await con.OpenAsync();
+
+                 await using var tx = await con.BeginTransactionAsync();
+
+                 using (var cmd = new NpgsqlCommand("CALL public.usp_upload_pi_pef(@p_temp_pi_no, @p_pi_no, @p_pef_file_name, @p_pi_file_name, @p_action_type, @action_result, @result_msg)", con, tx))
+                 {
+                     cmd.CommandType = CommandType.Text;
+
+                     // IN parameters
+                     cmd.Parameters.AddWithValue("p_temp_pi_no", HttpContext.Session.GetString("Temp_pi_no") ?? (object)DBNull.Value);
+                     cmd.Parameters.AddWithValue("p_pi_no", uploadPI.pi_no ?? (object)DBNull.Value);
+                     cmd.Parameters.AddWithValue("p_pef_file_name", pef_file_name);
+                     cmd.Parameters.AddWithValue("p_pi_file_name", pi_file_name);
+                     cmd.Parameters.AddWithValue("p_action_type", "upload");
+
+                     // OUT parameters
+                     cmd.Parameters.Add(new NpgsqlParameter("action_result", NpgsqlDbType.Integer) { Direction = ParameterDirection.InputOutput, Value = DBNull.Value });
+                     cmd.Parameters.Add(new NpgsqlParameter("result_msg", NpgsqlDbType.Text) { Direction = ParameterDirection.InputOutput, Value = DBNull.Value });
+
+                     await cmd.ExecuteNonQueryAsync();
+
+                     // Read OUT parameters
+                     actionResult = (int)cmd.Parameters["action_result"].Value;
+                     resultMsg = cmd.Parameters["result_msg"].Value.ToString();
+                 }
+
+                 if (actionResult > 0)
+                 {
+                     using (var stream = new FileStream(filePath_pef, FileMode.Create))
+                         await uploadPI.pef_rc_nicsi.CopyToAsync(stream);
+
+                     using (var stream = new FileStream(filePath_pi, FileMode.Create))
+                         await uploadPI.pi_file_name.CopyToAsync(stream);
+
+                     await tx.CommitAsync();
+
+                     uploadpi.IsSuccess = true;
+                     TempData["Message"] = resultMsg;
+                 }
+                 else
+                 {
+                     await tx.RollbackAsync();
+                     uploadpi.IsSuccess = false;
+                     TempData["Message"] = resultMsg;
+                 }
+
+                 await con.CloseAsync();
+             }
+             catch (Exception ex)
+             {
+                 uploadpi.IsSuccess = false;
+                 TempData["Message"] = "Error: " + ex.Message;
+             }
+         }
+         else
+         {
+             uploadpi.IsSuccess = false;
+             TempData["Message"] = "Invalid form data!";
+         }
+     }
+     else
+     {
+         uploadpi.IsSuccess = false;
+         TempData["Message"] = "No file selected.";
+     }
+
+     return Page();
+ }
