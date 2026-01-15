@@ -1,0 +1,87 @@
+using OMS;
+using OMS.Models;
+using System.Diagnostics;
+
+public class AuditMiddleware
+{
+    private readonly RequestDelegate _next;
+
+    public AuditMiddleware(RequestDelegate next)
+    {
+        _next = next;
+    }
+
+    public async Task InvokeAsync(
+        HttpContext context,
+        ApplicationDbContext db)
+    {
+        //Exclude static files
+        var path = context.Request.Path.Value?.ToLower();
+        if (path.StartsWith("/css") ||
+            path.StartsWith("/js") ||
+            path.StartsWith("/lib") ||
+            path.StartsWith("/img") ||
+            path.EndsWith(".css") ||
+            path.EndsWith(".js") ||
+            path.EndsWith(".png") ||
+            path.EndsWith(".jpg") ||
+            path.EndsWith(".ico"))
+        {
+            await _next(context);
+            return;
+        }
+
+        var startTime = DateTime.UtcNow;
+        var sw = Stopwatch.StartNew();
+
+        await _next(context);
+
+        sw.Stop();
+
+        //  Identify user
+        string userType = "Anonymous";
+        string userId = null;
+        string admin_user = context.Session.GetString("UserName")?? null; 
+        string public_user = context.Session.GetString("Temp_pi_no")?? null;
+        if (context.User?.Identity?.IsAuthenticated == true)
+        {
+            userType = "Admin";
+            //userId = context.Session.GetString("UserName");
+            if (admin_user != null)
+            {
+                userId = admin_user;
+            }
+        }
+        else if (public_user !=null)
+        {
+            userType = "Public";
+            //userId = context.Session.GetString("UserName"); 
+            if (public_user != null)
+            {
+                userId = public_user;
+            }
+        }
+
+        var audit = new AuditLog
+        {
+            timestamp_utc = startTime,
+            user_type = userType,
+            user_id = userId,
+
+            url = context.Request.Path,
+            http_method = context.Request.Method,
+            action = context.Request.Method == "GET"
+                        ? "PageOpen"
+                        : "Submit",
+
+            ip_address = context.Connection.RemoteIpAddress?.ToString(),
+            user_agent = context.Request.Headers["User-Agent"],
+
+            status_code = context.Response.StatusCode,
+            duration_ms = sw.ElapsedMilliseconds
+        };
+
+        db.audit_logs.Add(audit);
+        await db.SaveChangesAsync();
+    }
+}
