@@ -189,11 +189,6 @@ var builder = WebApplication.CreateBuilder(args);
 // Get connection string from static class
 var connectionString = ConnectionString.CName;
 
-//builder.Services.AddDbContext<ApplicationDbContext>(options =>
-//    options.UseNpgsql(ConnectionString.CName));
-
-//builder.Services.AddDefaultIdentity<IdentityUser>()
-//    .AddEntityFrameworkStores<ApplicationDbContext>();
 builder.Services.AddDbContext<ApplicationDbContext>(options =>
     options.UseNpgsql(
         builder.Configuration.GetConnectionString("DefaultConnection")));
