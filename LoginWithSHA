@@ -1,0 +1,266 @@
+using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.Authentication.Cookies;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.RazorPages;
+using Microsoft.AspNetCore.RateLimiting;
+using OMS.Models;
+using System.Security.Claims;
+using System.Security.Cryptography;
+using System.Text;
+
+namespace OMS.Pages
+{
+    public class LoginModel : PageModel
+    {
+        [BindProperty]
+        public User? usermodel { get; set; }
+
+        [BindProperty]
+        public string CaptchaInput { get; set; }
+
+        // OPTIONAL: for client-side salted SHA
+        [BindProperty]
+        public string? SaltedSHA { get; set; }
+
+        [BindProperty]
+        public string hashedPassword { get; set; }
+        private readonly DataAccessLayer objUser = new DataAccessLayer();
+        private readonly ILogger<LoginModel> _logger;
+
+        // ===== RATE LIMIT STORAGE =====
+        private static readonly Dictionary<string, List<DateTime>> Attempts = new();
+
+        public LoginModel(ILogger<LoginModel> logger)
+        {
+            _logger = logger;
+        }
+
+        public void OnGet()
+        {
+            // Generate salt for client-side hashing (optional)
+            string salt = Guid.NewGuid().ToString("N");
+            HttpContext.Session.SetString("LoginSalt", salt);
+        }
+
+        [EnableRateLimiting("login")]
+        public async Task<IActionResult> OnPost()
+        {            
+            // 2️⃣ CAPTCHA validation
+            string sessionCaptcha = HttpContext.Session.GetString("captcha");
+            if (string.IsNullOrEmpty(sessionCaptcha) ||
+                !string.Equals(CaptchaInput, sessionCaptcha, StringComparison.OrdinalIgnoreCase))
+            {
+                ModelState.AddModelError("", "Invalid CAPTCHA.");
+                return Page();
+            }
+            HttpContext.Session.Remove("captcha");
+
+            // 3️⃣ Input validation
+            if (usermodel == null || string.IsNullOrWhiteSpace(usermodel.Username))
+            {
+                ModelState.AddModelError("", "Invalid request.");
+                return Page();
+            }
+
+            // 4️⃣ Fetch user from DB
+            User user = objUser.GetUserByUsername(usermodel.Username);
+            if (user == null)
+            {
+                ModelState.AddModelError("", "Invalid username or password");
+                return Page();
+            }
+
+            // 5️⃣ Check if account is locked
+            if (user.IsLocked)
+            {
+                // Lock still active → BLOCK
+                if (user.LockoutEnd.HasValue && user.LockoutEnd.Value > DateTime.UtcNow)
+                {
+                    ModelState.AddModelError("",
+                        $"Account locked until {user.LockoutEnd:yyyy-MM-dd HH:mm} UTC");
+                    return Page();
+                }
+
+                // Lock expired → unlock but continue login
+                if ( user.LockoutEnd <= DateTime.UtcNow)
+                {
+                    // Expired → unlock only to allow login attempt
+                    user.IsLocked = false;
+                    user.FailedLoginAttempts = 0;
+                    user.LockoutEnd = null;
+                    objUser.UpdateUser(user);
+                }
+
+            }
+
+            // 6️⃣ Password verification
+            if (string.IsNullOrEmpty(SaltedSHA))
+            {
+                ModelState.AddModelError("", "Password required.");
+                return Page();
+            }
+
+            string hash1FromDb = user.PasswordHash;
+            string loginSalt = HttpContext.Session.GetString("LoginSalt") ?? "";
+
+            // Compute SHA256(salt + hash1)
+            byte[] serverHashBytes;
+            using (SHA256 sha256 = SHA256.Create())
+            {
+                serverHashBytes = sha256.ComputeHash(
+                    Encoding.UTF8.GetBytes(loginSalt + hash1FromDb)
+                );
+            }
+
+            string serverHashHex =
+                BitConverter.ToString(serverHashBytes).Replace("-", "").ToLower();
+
+            // 7️⃣ Wrong password → increment failed attempts
+            if (!string.Equals(SaltedSHA, serverHashHex, StringComparison.OrdinalIgnoreCase))
+            {
+                user.FailedLoginAttempts++;
+
+                if (user.FailedLoginAttempts >= 5)
+                {
+                    user.IsLocked = true;
+                    user.LockoutEnd = DateTime.UtcNow.AddMinutes(10);
+                }
+
+                objUser.UpdateUser(user);
+
+                ModelState.AddModelError("", "Invalid username or password");
+                return Page();
+            }
+
+            // 8️⃣ Successful login → reset failed attempts & unlock
+            user.FailedLoginAttempts = 0;
+            user.IsLocked = false;
+            user.LockoutEnd = null;
+            objUser.UpdateUser(user);
+
+            // 9️⃣ Sign in user (cookie auth)
+            var identity = new ClaimsIdentity(
+                new[]
+                {
+            new Claim("UserId", user.UserId.ToString(), ClaimValueTypes.Integer32)
+                },
+                CookieAuthenticationDefaults.AuthenticationScheme
+            );
+
+            var authProperties = new AuthenticationProperties
+            {
+                IsPersistent = true,
+                ExpiresUtc = DateTime.UtcNow.AddMinutes(20)
+            };
+
+            await HttpContext.SignInAsync(
+                CookieAuthenticationDefaults.AuthenticationScheme,
+                new ClaimsPrincipal(identity),
+                authProperties
+            );
+
+            HttpContext.Session.SetString("UserId", user.UserId.ToString());
+            HttpContext.Session.SetString("UserName", user.Username.ToString());
+
+            return RedirectToPage("Dashboard");
+        }
+
+    }
+}
+
+
+-----------------program.cs--------------------
+
+using Microsoft.AspNetCore.Authentication.Cookies;
+using Microsoft.AspNetCore.Connections;
+using Microsoft.AspNetCore.Identity;
+using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
+using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
+using Microsoft.AspNetCore.Identity;
+
+using OMS;
+using System.Configuration;
+using System.Threading.RateLimiting;
+
+var builder = WebApplication.CreateBuilder(args);
+
+// Get connection string from static class
+var connectionString = ConnectionString.CName;
+
+//builder.Services.AddDbContext<ApplicationDbContext>(options =>
+//    options.UseNpgsql(ConnectionString.CName));
+
+//builder.Services.AddDefaultIdentity<IdentityUser>()
+//    .AddEntityFrameworkStores<ApplicationDbContext>();
+builder.Services.AddDbContext<ApplicationDbContext>(options =>
+    options.UseNpgsql(
+        builder.Configuration.GetConnectionString("DefaultConnection")));
+
+// Identity
+builder.Services.AddDefaultIdentity<IdentityUser>()
+    .AddEntityFrameworkStores<ApplicationDbContext>();
+builder.Services.AddRazorPages();
+builder.Services.AddDistributedMemoryCache();
+builder.Services.AddSession(options =>
+{
+    options.IdleTimeout = TimeSpan.FromMinutes(20);
+    options.Cookie.HttpOnly = true;
+    options.Cookie.IsEssential = true;
+    options.Cookie.SameSite = SameSiteMode.Strict;
+    options.Cookie.SecurePolicy = CookieSecurePolicy.Always;
+});
+builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
+    .AddCookie(options =>
+    {
+        options.LoginPath = "/Login";
+        options.AccessDeniedPath = "/AccessDenied";
+        options.ExpireTimeSpan = TimeSpan.FromMinutes(20);
+        options.SlidingExpiration = true;
+    });
+
+builder.Services.AddAuthorization();
+// 🚦 RATE LIMITING (LOGIN BRUTE-FORCE PROTECTION)
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+
+    options.AddFixedWindowLimiter("login", limiter =>
+    {
+        limiter.PermitLimit = 5;                  // 5 attempts
+        limiter.Window = TimeSpan.FromMinutes(5); // per 5 minutes
+        limiter.QueueLimit = 0;
+        limiter.QueueProcessingOrder = QueueProcessingOrder.OldestFirst;
+    });
+});
+
+
+var app = builder.Build();
+
+if (!app.Environment.IsDevelopment())
+{
+    app.UseExceptionHandler("/Error");
+    app.UseHsts();
+}
+
+app.UseHttpsRedirection();
+app.UseStaticFiles();
+app.UseRouting();
+
+app.UseSession();
+// Enable rate limiting
+app.UseRateLimiter();
+app.UseAuthentication();
+app.UseAuthorization();
+
+app.UseMiddleware<AuditMiddleware>();   // after auth
+
+app.MapStaticAssets();
+app.MapRazorPages()
+   .WithStaticAssets();
+//app.UseMiddleware<AuthenticationMiddleware>();
+
+app.MapControllers();
+app.Run();
+
