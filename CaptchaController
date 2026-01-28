@@ -1,0 +1,32 @@
+using Microsoft.AspNetCore.Mvc;
+using System.Drawing;
+using System.Drawing.Imaging;
+
+namespace OMS.Controllers
+{
+    [Route("captcha")]
+    public class CaptchaController : Controller
+    {
+        [HttpGet]
+        public IActionResult Index()
+         {
+            const string chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz123456789";
+            var rnd= new Random();
+            string captcha = new string(Enumerable.Repeat(chars, 6)
+                .Select(s => s[rnd.Next(s.Length)]).ToArray() );
+
+            HttpContext.Session.SetString("captcha", captcha);
+            
+            using Bitmap bmp = new Bitmap(140, 60);
+            using Graphics g = Graphics.FromImage(bmp);
+            g.Clear(Color.White);
+            g.DrawString(captcha, new Font("Arial", 20, FontStyle.Bold | FontStyle.Italic), Brushes.Black,10,10);
+
+            var ms= new MemoryStream();
+            bmp.Save(ms, ImageFormat.Png);
+            ms.Position = 0;
+
+            return File(ms, "image/png");
+        }
+    }
+}
