@@ -1,0 +1,54 @@
+DO $$
+DECLARE
+    r RECORD;
+    conn_name TEXT := 'dashboard_conn';
+BEGIN
+-- Disconnect if connection already exists
+    BEGIN
+        PERFORM dblink_disconnect(conn_name);
+    EXCEPTION
+        WHEN OTHERS THEN
+            -- Ignore error if connection does not exist
+            NULL;
+    END;
+    -- Connect to target database
+    PERFORM dblink_connect(
+        conn_name,
+        'host=localhost port=5432 dbname=dashboard user=postgres password=postgres'
+    );
+
+    -- Loop through source cats table
+    FOR r IN
+        SELECT
+            cat_no,
+            title,
+            standard_no,
+            lib_code
+        FROM cats
+        WHERE cat_no IS NOT NULL
+    LOOP
+
+        -- Update matching record in target database
+        PERFORM dblink_exec(
+            conn_name,
+            format(
+                $sql$
+                UPDATE public.cats
+                SET
+                    title = %L,
+                    standard_no = %L,
+                    lib_code = %L
+                WHERE cat_no = %L
+                $sql$,
+                r.title,
+                r.standard_no,
+                r.lib_code
+            )
+        );
+
+    END LOOP;
+
+    -- Disconnect
+    PERFORM dblink_disconnect(conn_name);
+
+END $$;
